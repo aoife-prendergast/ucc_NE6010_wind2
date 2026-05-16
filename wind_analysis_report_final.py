@@ -1048,38 +1048,88 @@ for vessel in VESSEL_WIND_LIMITS:
     color  = VESSELS[vessel]['color']
     p_hr   = _wcdf(v_lim, _C_w, _k_w)
 
-    # ALL HOURS: P(full 24-h day operable) = P_hr^24
-    # Assumes consecutive hourly wind speeds are statistically independent —
-    # a simplification that over-estimates operability because real wind speed
-    # exhibits positive autocorrelation (calm spells persist).  The result
-    # should therefore be treated as an upper-bound estimate.
-    p_d24  = p_hr ** 24
-    ann_24 = sum(_avg_month_days[m] * p_d24 for m in range(1, 13))  # [days/yr]
+    # ALL HOURS: operable hours/year = P(hour within limit) × 8760
+    # This directly gives the expected number of hours per year where wind
+    # is within the vessel's operational limit, based on the Weibull fit.
+    # Equivalent operable days = operable hours / 24.
+    op_hours_24h = p_hr * 8760                    # [h/yr] operable hours
+    ann_24       = op_hours_24h / 24              # [days/yr] equivalent operable days
 
-    # DAYLIGHT ONLY: n_dl varies by month as sunrise/sunset shifts seasonally.
-    # Same independence assumption applies; n_dl < 24 so p_hr^n_dl > p_hr^24,
-    # giving more operable days in the daylight-only scenario as expected.
-    ann_dl = 0.0
-    for m in range(1, 13):
-        n_dl    = _dl_hrs.get(m, 12.0)          # [h] mean daylight hours for month m
-        ann_dl += _avg_month_days[m] * (p_hr ** n_dl)
+    # DAYLIGHT ONLY: weight each month by its mean daylight hours.
+    # Total annual daylight hours at site, then scale by P(hour operable).
+    total_dl_hours = sum(_avg_month_days[m] * _dl_hrs.get(m, 12.0)
+                         for m in range(1, 13))   # [h/yr] total daylight hours
+    op_hours_dl    = p_hr * total_dl_hours         # [h/yr] operable daylight hours
+    ann_dl         = op_hours_dl / _dl_monthly.mean()  # [days/yr] equivalent operable days
 
     wind_res[vessel] = {
-        'v_lim':      v_lim,       # [m/s] operational wind speed limit
-        'p_hour':     p_hr,        # [–]   P(1 hour within limit)
-        'p_day_24h':  p_d24,       # [–]   P(full 24-h day within limit)
-        'annual_24h': ann_24,      # [days/yr] expected operable days, all hours
-        'pct_24h':    100 * ann_24 / 365,  # [%]
-        'annual_dl':  ann_dl,
-        'pct_dl':     100 * ann_dl / 365,
-        'color':      color,
+        'v_lim':         v_lim,            # [m/s] operational wind speed limit
+        'p_hour':        p_hr,             # [–]   P(1 hour within limit)
+        'op_hours_24h':  op_hours_24h,     # [h/yr] operable hours (all hours)
+        'annual_24h':    ann_24,           # [days/yr] equivalent operable days, all hours
+        'pct_24h':       100 * p_hr,       # [%]  same as hourly probability
+        'op_hours_dl':   op_hours_dl,      # [h/yr] operable daylight hours
+        'annual_dl':     ann_dl,           # [days/yr] equivalent operable days, daylight
+        'pct_dl':        100 * op_hours_dl / total_dl_hours,  # [%]
+        'color':         color,
     }
 
     print(f"\n{vessel} (wind <= {v_lim} m/s at {REF_HEIGHT} m):")
-    print(f"  P(1-hour operable)             : {p_hr:.4f}  ({100*p_hr:.2f} %)")
-    print(f"  P(full 24-h day operable)      : {p_d24:.4f}  ({100*p_d24:.2f} %)")
-    print(f"  Est. annual days, all hours    : {ann_24:.1f}  ({100*ann_24/365:.1f} %)")
-    print(f"  Est. annual days, daylight only: {ann_dl:.1f}  ({100*ann_dl/365:.1f} %)")
+    print(f"  P(hour operable)  [Weibull CDF]: {p_hr:.4f}  ({100*p_hr:.2f} %)")
+    print(f"  Operable hours/yr (all hours)  : {op_hours_24h:.0f} h  =>  {ann_24:.1f} equiv. days")
+    print(f"  Operable hours/yr (daylight)   : {op_hours_dl:.0f} h  =>  {ann_dl:.1f} equiv. days")
+
+# ── Wave-based operational days (Weibull fit to Hs) ──────────
+print("\n" + "="*60)
+print("WAVE-BASED OPERATIONAL DAYS (Weibull fit to Hs)")
+print("="*60)
+
+# Weibull CDF for Hs: P(Hs <= h) = 1 - exp(-(h/C)^k)
+def _wcdf_hs(h, C, k):
+    return 1.0 - np.exp(-(h / C) ** k)
+
+print(f"\nWeibull parameters for Hs:")
+print(f"  All hours  : k={_hs_k_all:.4f}, C={_hs_C_all:.4f} m")
+print(f"  Daylight   : k={_hs_k_dl:.4f},  C={_hs_C_dl:.4f} m")
+print(f"\nVessel Hs limits:")
+for v, cfg in VESSELS.items():
+    print(f"  {v}: Hs <= {cfg['max_hs']} m")
+
+wave_weibull_res = {}
+for vessel, cfg in VESSELS.items():
+    hs_lim = cfg['max_hs']
+    color  = cfg['color']
+
+    # All hours: use the all-hours Weibull fit
+    p_hr_all    = _wcdf_hs(hs_lim, _hs_C_all, _hs_k_all)
+    op_hrs_24h  = p_hr_all * 8760
+    days_24h    = op_hrs_24h / 24
+
+    # Daylight only: use the daylight Weibull fit, scaled to daylight hours
+    p_hr_dl        = _wcdf_hs(hs_lim, _hs_C_dl, _hs_k_dl)
+    total_dl_hours = sum(_avg_month_days[m] * _dl_hrs.get(m, 12.0)
+                         for m in range(1, 13))
+    op_hrs_dl      = p_hr_dl * total_dl_hours
+    days_dl        = op_hrs_dl / _dl_monthly.mean()
+
+    wave_weibull_res[vessel] = {
+        'hs_lim':        hs_lim,
+        'p_hour_all':    p_hr_all,
+        'op_hours_24h':  op_hrs_24h,
+        'annual_24h':    days_24h,
+        'pct_24h':       100 * p_hr_all,
+        'p_hour_dl':     p_hr_dl,
+        'op_hours_dl':   op_hrs_dl,
+        'annual_dl':     days_dl,
+        'pct_dl':        100 * p_hr_dl,
+        'color':         color,
+    }
+
+    print(f"\n{vessel} (Hs <= {hs_lim} m):")
+    print(f"  P(hour operable) [Weibull, all hrs] : {p_hr_all:.4f}  ({100*p_hr_all:.2f} %)")
+    print(f"  Operable hours/yr (all hours)       : {op_hrs_24h:.0f} h  =>  {days_24h:.1f} equiv. days")
+    print(f"  P(hour operable) [Weibull, daylight]: {p_hr_dl:.4f}  ({100*p_hr_dl:.2f} %)")
+    print(f"  Operable hours/yr (daylight)        : {op_hrs_dl:.0f} h  =>  {days_dl:.1f} equiv. days")
 
 print("\n--- COMBINED WIND + WAVE ACCESSIBILITY SUMMARY ---")
 for vessel in VESSELS:
@@ -1292,12 +1342,13 @@ with pd.ExcelWriter(xl_path, engine='openpyxl') as writer:
     _ww_hdrs = [
         'Vessel',
         f'Max Wind Speed (m/s) at {REF_HEIGHT} m',
-        'P(1-hour operable) (%)',
-        'P(full 24-h day operable) (%)',
-        'Est. annual days - all hours',
-        'Accessibility % - all hours',
-        'Est. annual days - daylight only',
-        'Accessibility % - daylight only',
+        'P(hour operable) (%)',
+        'Operable hours/yr (all hours)',
+        'Equiv. operable days (all hours)',
+        'Accessibility % (all hours)',
+        'Operable hours/yr (daylight)',
+        'Equiv. operable days (daylight)',
+        'Accessibility % (daylight)',
     ]
     for _ci, _h in enumerate(_ww_hdrs, 1):
         _ws_ww.cell(row=_r2, column=_ci, value=_h).font = SUB_FONT
@@ -1307,19 +1358,88 @@ with pd.ExcelWriter(xl_path, engine='openpyxl') as writer:
         for _ci, _val in enumerate([
             _vessel,
             _wr['v_lim'],
-            round(100 * _wr['p_hour'],    2),
-            round(100 * _wr['p_day_24h'], 2),
-            round(_wr['annual_24h'],      1),
-            round(_wr['pct_24h'],         1),
-            round(_wr['annual_dl'],       1),
-            round(_wr['pct_dl'],          1),
+            round(100 * _wr['p_hour'],     2),
+            round(_wr['op_hours_24h'],     0),
+            round(_wr['annual_24h'],       1),
+            round(_wr['pct_24h'],          1),
+            round(_wr['op_hours_dl'],      0),
+            round(_wr['annual_dl'],        1),
+            round(_wr['pct_dl'],           1),
         ], 1):
             _ws_ww.cell(row=_r2, column=_ci, value=_val)
         _r2 += 1
 
     # Column widths
-    for _ci, _cw in enumerate([34, 34, 26, 30, 30, 24, 34, 28], 1):
+    for _ci, _cw in enumerate([34, 34, 26, 30, 30, 24, 34, 28, 28], 1):
         _ws_ww.column_dimensions[get_column_letter(_ci)].width = _cw
+
+    # Sheet: Wave Weibull-based estimate (analogous to Wind_Weibull)
+    _ws_hw = writer.book.create_sheet('Wave_Weibull')
+    _r3 = 1
+
+    # ── Section 1: Weibull parameters for Hs ─────────────────
+    _ws_hw.cell(row=_r3, column=1,
+                value='WEIBULL PARAMETERS FOR Hs (SWAN hindcast, 2021-2025)').font = SUB_FONT
+    _ws_hw.cell(row=_r3, column=1).fill = SUB_FILL
+    _ws_hw.cell(row=_r3, column=2).fill = SUB_FILL
+    _ws_hw.cell(row=_r3, column=3).fill = SUB_FILL
+    _r3 += 1
+    for _lbl, _val_all, _val_dl in [
+        ('Shape parameter k', round(_hs_k_all, 4), round(_hs_k_dl, 4)),
+        ('Scale parameter C (m)', round(_hs_C_all, 4), round(_hs_C_dl, 4)),
+    ]:
+        _ws_hw.cell(row=_r3, column=1, value=_lbl)
+        _ws_hw.cell(row=_r3, column=2, value=f'All hours: {_val_all}')
+        _ws_hw.cell(row=_r3, column=3, value=f'Daylight: {_val_dl}')
+        _r3 += 1
+    _r3 += 1
+
+    # ── Section 2: Vessel Hs limits ──────────────────────────
+    _ws_hw.cell(row=_r3, column=1, value='VESSEL Hs LIMITS').font = SUB_FONT
+    _ws_hw.cell(row=_r3, column=1).fill = SUB_FILL
+    _ws_hw.cell(row=_r3, column=2).fill = SUB_FILL
+    _r3 += 1
+    _ws_hw.cell(row=_r3, column=1, value='Vessel').font = SUB_FONT
+    _ws_hw.cell(row=_r3, column=2, value='Max Hs (m)').font = SUB_FONT
+    _r3 += 1
+    for _vessel, _cfg in VESSELS.items():
+        _ws_hw.cell(row=_r3, column=1, value=_vessel)
+        _ws_hw.cell(row=_r3, column=2, value=_cfg['max_hs'])
+        _r3 += 1
+    _r3 += 1
+
+    # ── Section 3: Per-vessel probability & annual days table ─
+    _hw_hdrs = [
+        'Vessel',
+        'Max Hs (m)',
+        'P(hour operable) % (all hrs)',
+        'Operable hours/yr (all hours)',
+        'Equiv. operable days (all hours)',
+        'P(hour operable) % (daylight)',
+        'Operable hours/yr (daylight)',
+        'Equiv. operable days (daylight)',
+    ]
+    for _ci, _h in enumerate(_hw_hdrs, 1):
+        _ws_hw.cell(row=_r3, column=_ci, value=_h).font = SUB_FONT
+        _ws_hw.cell(row=_r3, column=_ci).fill = SUB_FILL
+    _r3 += 1
+    for _vessel, _wr in wave_weibull_res.items():
+        for _ci, _val in enumerate([
+            _vessel,
+            _wr['hs_lim'],
+            round(100 * _wr['p_hour_all'],  2),
+            round(_wr['op_hours_24h'],      0),
+            round(_wr['annual_24h'],        1),
+            round(100 * _wr['p_hour_dl'],   2),
+            round(_wr['op_hours_dl'],       0),
+            round(_wr['annual_dl'],         1),
+        ], 1):
+            _ws_hw.cell(row=_r3, column=_ci, value=_val)
+        _r3 += 1
+
+    # Column widths for Wave_Weibull sheet
+    for _ci, _cw in enumerate([34, 14, 30, 30, 34, 30, 30, 34], 1):
+        _ws_hw.column_dimensions[get_column_letter(_ci)].width = _cw
 
     # Sheet: Combined wind + wave estimate
     comb_rows = []
@@ -1674,6 +1794,97 @@ with pd.ExcelWriter(xl_ww, engine='openpyxl') as writer:
     pd.DataFrame(month_rows).to_excel(writer, sheet_name='Monthly_Summary', index=False)
 
 print("Saved: Q2_weather_windows.xlsx")
+
+# ── CTV Daylight-Only Weather Window Analysis ─────────────────
+print("\n" + "="*60)
+print("Q2 EXTRA – CTV DAYLIGHT-ONLY WEATHER WINDOWS (2024)")
+print("="*60)
+
+# Add daylight flag to merged_ww using the sunrise/sunset table already computed
+_ss_2024 = sunrise_sunset_df[sunrise_sunset_df['date'].apply(
+    lambda d: d.year if hasattr(d, 'year') else pd.Timestamp(d).year) == 2024].copy()
+merged_ww = merged_ww.merge(
+    _ss_2024[['date', 'sunrise_utc', 'sunset_utc']],
+    on='date', how='left'
+)
+merged_ww['is_daylight_ww'] = (
+    (merged_ww['time'] >= merged_ww['sunrise_utc']) &
+    (merged_ww['time'] <  merged_ww['sunset_utc'])
+)
+
+# Filter to daylight hours only
+_dl_ww = merged_ww[merged_ww['is_daylight_ww']].copy().reset_index(drop=True)
+_dl_times = _dl_ww['time'].values
+
+_ctv_vp = VESSEL_PARAMS['Crew Transfer Vessel']
+_n_req  = _ctv_vp['window_h']
+
+ok_wind_dl = (_dl_ww['WindSpeed_ms'] <= _ctv_vp['max_wind_ms']).fillna(False)
+ok_wave_dl = (_dl_ww['hs']           <= _ctv_vp['max_hs']).fillna(False)
+ok_comb_dl = (ok_wind_dl & ok_wave_dl)
+
+# Find qualifying windows — note: daylight hours are NOT contiguous (gaps at night),
+# so we must check for time continuity. Use the same function but on the filtered data
+# reindexed to detect night gaps as breaks.
+_dl_ww['_consecutive'] = (_dl_ww['time'].diff() > pd.Timedelta(hours=1)).cumsum()
+_dl_windows = []
+for _, grp in _dl_ww.groupby('_consecutive'):
+    _ok_grp = ((grp['WindSpeed_ms'] <= _ctv_vp['max_wind_ms']) &
+               (grp['hs']           <= _ctv_vp['max_hs'])).fillna(False)
+    _wins = find_weather_windows(_ok_grp, grp['time'].values, _n_req)
+    _dl_windows.extend(_wins)
+
+_dl_wins_df = pd.DataFrame(_dl_windows)
+if not _dl_wins_df.empty:
+    _dl_wins_df['start']   = pd.to_datetime(_dl_wins_df['start'])
+    _dl_wins_df['end']     = pd.to_datetime(_dl_wins_df['end'])
+    _dl_wins_df['month']   = _dl_wins_df['start'].dt.month
+
+_dl_monthly_wins = (_dl_wins_df.groupby('month')['duration_h'].count()
+                    .reindex(range(1, 13), fill_value=0)
+                    if not _dl_wins_df.empty
+                    else pd.Series(0, index=range(1, 13)))
+
+# Monthly operable hours within qualifying blocks (daylight only)
+_dl_in_block = np.zeros(len(_dl_ww), dtype=bool)
+_offset = 0
+for _, grp in _dl_ww.groupby('_consecutive'):
+    _ok_grp = ((grp['WindSpeed_ms'] <= _ctv_vp['max_wind_ms']) &
+               (grp['hs']           <= _ctv_vp['max_hs'])).fillna(False)
+    _blk = _hours_in_qualifying_blocks(_ok_grp.values, _n_req)
+    _dl_in_block[_offset:_offset + len(grp)] = _blk
+    _offset += len(grp)
+_dl_ww['_in_block'] = _dl_in_block
+_dl_monthly_block = (
+    _dl_ww.groupby('month')
+    .agg(_block_h=('_in_block', 'sum'), _total_h=('_in_block', 'count'))
+    .reindex(range(1, 13), fill_value=0)
+)
+_dl_monthly_block['pct'] = 100.0 * _dl_monthly_block['_block_h'] / _dl_monthly_block['_total_h'].replace(0, np.nan)
+
+_pct_wind_dl = ok_wind_dl.sum() / len(ok_wind_dl) * 100
+_pct_wave_dl = ok_wave_dl.sum() / len(ok_wave_dl) * 100
+_pct_comb_dl = ok_comb_dl.sum() / len(ok_comb_dl) * 100
+
+print(f"\nCrew Transfer Vessel – DAYLIGHT ONLY  "
+      f"[wind <= {_ctv_vp['max_wind_ms']} m/s, Hs <= {_ctv_vp['max_hs']} m, window = {_n_req} h]")
+print(f"  Daylight hours in 2024       : {len(_dl_ww)}")
+print(f"  Hours where wind OK          : {ok_wind_dl.sum()} / {len(_dl_ww)}  ({_pct_wind_dl:.1f} %)")
+print(f"  Hours where wave OK          : {ok_wave_dl.sum()} / {len(_dl_ww)}  ({_pct_wave_dl:.1f} %)")
+print(f"  Hours where both OK          : {ok_comb_dl.sum()} / {len(_dl_ww)}  ({_pct_comb_dl:.1f} %)")
+print(f"  Qualifying windows (>= {_n_req} h) : {len(_dl_windows)}")
+if _dl_windows:
+    _durs = _dl_wins_df['duration_h']
+    print(f"  Window durations: min={_durs.min()} h, mean={_durs.mean():.0f} h, max={_durs.max()} h")
+    print(f"  Monthly distribution:")
+    for m, cnt in _dl_monthly_wins.items():
+        print(f"    {calendar.month_abbr[m]:>3}: {cnt} window(s)")
+print(f"  Monthly operable hours (within >={_n_req} h blocks, daylight only):")
+for m, row in _dl_monthly_block.iterrows():
+    print(f"    {calendar.month_abbr[m]:>3}: {int(row['_block_h']):>4} / {int(row['_total_h']):>4} h  ({row['pct']:.1f} %)")
+
+# Clean up temporary columns
+merged_ww.drop(columns=['sunrise_utc', 'sunset_utc', 'is_daylight_ww'], inplace=True, errors='ignore')
 
 print("\n" + "="*60)
 print("Q2 EXTRA - CONSECUTIVE WINDOW ANALYSIS COMPLETE")
